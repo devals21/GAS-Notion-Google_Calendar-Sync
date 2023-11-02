@@ -1,4 +1,17 @@
 //============================================================//
+//                      GLOBAL SETTINGS                       //
+//============================================================//
+
+const LOCALE_STRING = "es-ES";
+
+// Relative to the time of last full sync in days
+// **ALERT**: Modify these settings at your own risk, you may exceed the free GAS quotas
+const RELATIVE_MAX_DATE = 7; // 1 week
+const RELATIVE_MIN_DATE = 2; // 2 days
+
+//============================================================//
+
+//============================================================//
 //                SETTINGS FOR GOOGLE CALENDAR                //
 //============================================================//
 
