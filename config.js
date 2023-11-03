@@ -16,7 +16,7 @@ const RELATIVE_MIN_DATE = 2; // 2 days
 //============================================================//
 
 const CALENDAR_IDS = [
-  "primary", // Primary Local-181
+  "primary", // Primary
   getBirthDaysCalendarId(), // Birthdays
   // Add all the calendar IDs you want to sync
 ];
