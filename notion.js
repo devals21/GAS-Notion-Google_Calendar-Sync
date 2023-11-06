@@ -1,64 +1,92 @@
 //============================================================//
-//                       NOTION - UTILS                       //
+//                    NOTION - READ PAGES                     //
 //============================================================//
 
-/**
- * Interact with notion API
- * 
- * @param {String} url - url to send request to
- * @param {Object} payload_dict - payload to send with request
- * @param {String} method - method to use for request
- * @returns {Object} request response object
- */
-function notionFetch(url, payload_dict, method = "POST") {
-  // UrlFetchApp is sync even if async is specified
-  let options = {
-    method: method,
-    headers: getNotionHeaders(),
-    muteHttpExceptions: true,
-    ...(payload_dict && { payload: JSON.stringify(payload_dict) }),
+function getNotionPages() {
+  let lastSync = PropertiesService.getUserProperties().getProperty("LNGU");
+
+  let url = getDatabaseURL();
+  let payload = {
+    archived: true,
+    sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
   };
 
-  let response = UrlFetchApp.fetch(url, options);
-
-  if (response.getResponseCode() === 200) {
-    let response_data = JSON.parse(response.getContentText());
-    if (response_data.length == 0) {
-      throw new Error(
-        "No data returned from Notion API. Check your Notion token."
-      );
+  if (!lastSync) {
+    payload["filter"] = {
+      and: [
+        {
+          property: DATE_NOTION,
+          date: {
+            on_or_after: Utils.getRelativeDate(-RELATIVE_MIN_DATE).toISOString()
+          }
+        },
+        {
+          property: DATE_NOTION,
+          date: {
+            on_or_before: Utils.getRelativeDate(RELATIVE_MAX_DATE).toISOString()
+          }
+        },
+        {
+          property: IGNORE_NOTION,
+          checkbox: {
+            equals: false
+          },
+        },
+      ]
     }
-    return response_data;
-  } else if (response.getResponseCode() === 401) {
-    throw new Error("Notion token is invalid.");
-  } else {
-    throw new Error(response.getContentText());
   }
-}
+  else {
+    payload["filter"] = {
+      and: [
+        {
+          timestamp: "last_edited_time",
+          last_edited_time: {
+            on_or_after: lastSync
+          }
+        },
+        {
+          property: DATE_NOTION,
+          date: {
+            is_not_empty: true
+          }
+        },
+        {
+          property: EDITED_BY_NOTION,
+          last_edited_by: {
+            does_not_contain: Utils.splitIntegrationId(NOTION_INTEGRATION_ID)
+          }
+        },
+        {
+          property: IGNORE_NOTION,
+          checkbox: {
+            equals: false
+          },
+        },
+      ]
+    }
+  }
 
-function getNotionHeaders() {
-  return {
-    Authorization: `Bearer ${NOTION_TOKEN}`,
-    Accept: "application/json",
-    "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json",
-  };
-}
+  let response = notionFetch(url, payload, "POST");
+  if (response.results.length > 0) {
+    Logger.log("Processing %s pages found from Notion", response.results.length.toString());
+  }
+  else {
+    Logger.log("No pages found to process from Notion");
+  }
 
-function getDatabaseURL() {
-  return `https://api.notion.com/v1/databases/${DATABASE_ID}/query`;
-}
+  let newTime = new Date();
+  newTime.setMinutes(newTime.getMinutes() - 5);
+  response.results.lngu = newTime.toISOString();
 
-function getNotionParent() {
-  return {
-    database_id: DATABASE_ID,
-  };
+  return response.results;
 }
 
 //============================================================//
 
 
-
+//============================================================//
+//                     NOTION - GET PAGE                      //
+//============================================================//
 
 /**
  * Determine if a page exists for the event, and the page needs to be updated. 
@@ -100,6 +128,13 @@ function getPageFromEvent(event) {
   return false;
 }
 
+//============================================================//
+
+
+//============================================================//
+//                    NOTION - CREATE PAGE                    //
+//============================================================//
+
 /**
  * Create a new database entry for the event
  * 
@@ -132,6 +167,13 @@ function createDatabaseEntry(event, multi = false) {
   }
 }
 
+//============================================================//
+
+
+//============================================================//
+//                    NOTION - UPDATE PAGE                    //
+//============================================================//
+
 /**
  * Update database entry with new event information
  * 
@@ -142,9 +184,8 @@ function createDatabaseEntry(event, multi = false) {
  */
 function updateDatabaseEntry(event, pageId, multi = true) {
   let properties = convertToNotionProperty(event);
-  let archive = event.status === "cancelled";
 
-  return pushDatabaseUpdate(properties, pageId, archive, multi);
+  return pushDatabaseUpdate(properties, pageId, multi);
 }
 /**
  * Push update to notion database for page
@@ -159,18 +200,12 @@ function updateDatabaseEntry(event, pageId, multi = true) {
 function pushDatabaseUpdate(
   properties,
   pageId,
-  archive = false,
   multi = false
 ) {
   let url = "https://api.notion.com/v1/pages/" + pageId;
   let payload = {};
   payload["properties"] = properties;
-  //payload["archived"] = archive;
   payload["icon"] = setNotionIcon();
-
-  /*if (archive) {
-    Logger.log("Archiving cancelled event.");
-  }*/
 
   let options = {
     method: "PATCH",
@@ -187,6 +222,38 @@ function pushDatabaseUpdate(
   return UrlFetchApp.fetch(url, options);
 }
 
+//============================================================//
+
+
+//============================================================//
+//                    NOTION - DELETE PAGE                    //
+//============================================================//
+
+function setPageArchived(id) {
+  let url = "https://api.notion.com/v1/pages/" + id;
+  let payload = {};
+
+  payload["properties"] = {
+    [ARCHIVED_NOTION]: { checkbox: true }
+  }
+
+  let options = {
+    url: url,
+    method: "PATCH",
+    muteHttpExceptions: true,
+    headers: getNotionHeaders(),
+    payload: JSON.stringify(payload)
+  };
+  return options;
+}
+
+//============================================================//
+
+
+//============================================================//
+//                   NOTION - CONVERT PAGE                    //
+//============================================================//
+
 /**
  * Return notion JSON property object based on event data
  * 
@@ -195,32 +262,22 @@ function pushDatabaseUpdate(
  * @returns {Object} notion property object
  */
 function convertToNotionProperty(event) {
-  //let properties = getBaseNotionProperties(event.extendedProperties?.private["PID"], event.calendarId);
   let properties = getBaseNotionProperties(event.id, event.calendarId);
-  //let status = event.status == "cancelled" ? 
-  //  "ARCHIVED" : event.summary.startsWith("✔") ? "DONE" : 
-  //  getStatusProperty(event["start_time"]);
   let name = event.summary ? createNotionTitle(event.summary) : "";
-  //let des = parseDescription(event.description?.trim() || "");
 
   properties[ARCHIVED_NOTION] = {
     checkbox: event.status == "cancelled"
-  };
-  /*properties[STATUS_NOTION] = {
-    status: {
-      name: status
-    }
   };
   properties[DESCRIPTION_NOTION] = {
     type: "rich_text",
     rich_text: [
       {
         text: {
-          content: des.description,
+          content: event.description?.trim() || "",
         },
       },
     ],
-  };*/
+  };
   if (event.htmlLink) {
     properties[EVENT_LINK_NOTION] = {
       url: event.htmlLink
@@ -236,21 +293,6 @@ function convertToNotionProperty(event) {
       },
     ],
   };
-  /*properties[MICROSOFT_ID_NOTION] = {
-    type: "rich_text",
-    rich_text: [
-      {
-        text: {
-          content: event.task_id || "",
-        },
-      },
-    ],
-  };
-  let taskUrl = "https://to-do.live.com/tasks/id/" + 
-    (event.task_id ? event.task_id + "/details" : "");
-  properties[MICROSOFT_LINK_NOTION] = {
-    url: taskUrl,
-  };*/
 
   if (event.start) {
     let start_time;
@@ -325,41 +367,63 @@ function getBaseNotionProperties(eventId, calendarId) {
   };
 }
 
-function setPageArchived(id) {
-  let url = "https://api.notion.com/v1/pages/" + id;
-  let payload = {};
+//============================================================//
 
-  payload["properties"] = {
-    [ARCHIVED_NOTION]: { checkbox: true },
-    /*[MICROSOFT_ID_NOTION]: { type: "rich_text", rich_text: 
-      [{ text: { content: "", }, },], },
-    [MICROSOFT_LINK_NOTION]: { url: null, }*/
-  }
-
-  let options = {
-    url: url,
-    method: "PATCH",
-    muteHttpExceptions: true,
-    headers: getNotionHeaders(),
-    payload: JSON.stringify(payload)
-  };
-  return options;
-}
+//============================================================//
+//                       NOTION - UTILS                       //
+//============================================================//
 
 /**
- * Returns the corresponding status according to the relativity of the 
- * start date of the event with that of the execution (NOW)
+ * Interact with notion API
  * 
- * @param {Date} start
+ * @param {String} url - url to send request to
+ * @param {Object} payload_dict - payload to send with request
+ * @param {String} method - method to use for request
+ * @returns {Object} request response object
  */
-function getStatusProperty(start) {
-  if (typeof start === "string") {
-    start = new Date(start);
+function notionFetch(url, payload_dict, method = "POST") {
+  // UrlFetchApp is sync even if async is specified
+  let options = {
+    method: method,
+    headers: getNotionHeaders(),
+    muteHttpExceptions: true,
+    ...(payload_dict && { payload: JSON.stringify(payload_dict) }),
+  };
+
+  let response = UrlFetchApp.fetch(url, options);
+
+  if (response.getResponseCode() === 200) {
+    let response_data = JSON.parse(response.getContentText());
+    if (response_data.length == 0) {
+      throw new Error(
+        "No data returned from Notion API. Check your Notion token."
+      );
+    }
+    return response_data;
+  } else if (response.getResponseCode() === 401) {
+    throw new Error("Notion token is invalid.");
+  } else {
+    throw new Error(response.getContentText());
   }
-  if (start <= Utils.getRelativeDate(1, 0)) { return "ACTIVE"; }
-  else if (start > Utils.getRelativeDate(1, 0) && start <=
-    Utils.getRelativeDate(7, 0)) { return "PENDING"; }
-  else { return "NOT NOW"; }
+}
+
+function getNotionHeaders() {
+  return {
+    Authorization: `Bearer ${NOTION_TOKEN}`,
+    Accept: "application/json",
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json",
+  };
+}
+
+function getDatabaseURL() {
+  return `https://api.notion.com/v1/databases/${DATABASE_ID}/query`;
+}
+
+function getNotionParent() {
+  return {
+    database_id: DATABASE_ID,
+  };
 }
 
 function createNotionTitle(text) {
@@ -368,9 +432,10 @@ function createNotionTitle(text) {
 }
 
 function setNotionIcon() {
-  // https://www.notion.so/icons/squeeze-tube_gray.svg?mode=dark
   return {
     type: "external", external:
       { url: `https://api.iconify.design/tabler/bell-filled.svg?download=1&color=white&width=256&height=256` }
   }
 }
+
+//============================================================//
